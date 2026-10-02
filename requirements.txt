@@ -1,0 +1,28 @@
+# --- Core Data Processing ---
+pandas>=2.1.0
+pyarrow>=14.0.0
+numpy>=1.26.0
+
+# --- Storage & Data Lake ---
+minio>=7.2.0
+
+# --- Database & Warehouse ---
+psycopg2-binary>=2.9.9
+SQLAlchemy>=2.0.0
+
+# --- Transformation (dbt) ---
+dbt-core>=1.7.0
+dbt-postgres>=1.7.0
+
+# --- Synthetic Data Generation ---
+faker>=24.0.0
+
+# --- Utilities & Configuration ---
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+requests>=2.31.0
+
+# --- Testing & Code Quality ---
+pytest>=7.4.0
+pytest-cov>=4.1.0
+ruff>=0.2.0

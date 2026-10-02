@@ -1,0 +1,179 @@
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.3-python3.10
+  environment:
+    - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    - AIRFLOW__CORE__ENABLE_XCOM_PICKLING=false
+    - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${POSTGRES_USER:-dw_admin}:${POSTGRES_PASSWORD:-dw_password_dev_123}@postgres:5432/airflow
+    - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+    - AIRFLOW_UID=${AIRFLOW_UID:-50000}
+    - _AIRFLOW_WWW_USER_USERNAME=${_AIRFLOW_WWW_USER_USERNAME:-airflow_admin}
+    - _AIRFLOW_WWW_USER_PASSWORD=${_AIRFLOW_WWW_USER_PASSWORD:-airflow_password_dev_123}
+    # MinIO / S3 Connection Config for Tasks
+    - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minio_admin}
+    - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minio_password_dev_123}
+    - AWS_DEFAULT_REGION=us-east-1
+    - S3_ENDPOINT_URL=http://minio:9000
+    - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-ecommerce-lake}
+    # Warehouse Config for dbt & Tasks
+    - POSTGRES_HOST=postgres
+    - POSTGRES_PORT=5432
+    - POSTGRES_DB=${POSTGRES_DB:-ecommerce_dw}
+    - POSTGRES_USER=${POSTGRES_USER:-dw_admin}
+    - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-dw_password_dev_123}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./ingestion:/opt/airflow/ingestion
+    - ./transformation:/opt/airflow/transformation
+    - ./dbt:/opt/airflow/dbt
+    - ./data:/opt/airflow/data
+    - airflow_logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+  networks:
+    - data_platform_net
+
+services:
+  # ----------------------------------------------------------------------------
+  # Data Warehouse: PostgreSQL 16
+  # Hosts ecommerce_dw (Bronze, Silver, Gold schemas) & Airflow metadata DB
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: data_platform_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce_dw}
+      POSTGRES_USER: ${POSTGRES_USER:-dw_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dw_password_dev_123}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dw_admin} -d ${POSTGRES_DB:-ecommerce_dw}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - data_platform_net
+
+  # ----------------------------------------------------------------------------
+  # Data Lake: MinIO (S3 Compatible Object Storage)
+  # ----------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-03-05T04-48-44Z
+    container_name: data_platform_minio
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio_password_dev_123}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - data_platform_net
+
+  # ----------------------------------------------------------------------------
+  # MinIO Bucket Auto-Provisioner (One-off initialization task)
+  # ----------------------------------------------------------------------------
+  minio-init:
+    image: minio/mc:RELEASE.2024-03-03T17-50-39Z
+    container_name: data_platform_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minio_admin} ${MINIO_ROOT_PASSWORD:-minio_password_dev_123};
+      /usr/bin/mc mb --ignore-existing local/${MINIO_BUCKET_NAME:-ecommerce-lake};
+      /usr/bin/mc anonymous set download local/${MINIO_BUCKET_NAME:-ecommerce-lake};
+      exit 0;
+      "
+    networks:
+      - data_platform_net
+
+  # ----------------------------------------------------------------------------
+  # Airflow Database & Admin Initializer
+  # ----------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: data_platform_airflow_init
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create \
+        --username ${_AIRFLOW_WWW_USER_USERNAME:-airflow_admin} \
+        --password ${_AIRFLOW_WWW_USER_PASSWORD:-airflow_password_dev_123} \
+        --firstname Admin \
+        --lastname User \
+        --role Admin \
+        --email admin@example.com || true
+      "
+    restart: on-failure
+
+  # ----------------------------------------------------------------------------
+  # Airflow Webserver (UI)
+  # ----------------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: data_platform_airflow_webserver
+    restart: always
+    command: airflow webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ----------------------------------------------------------------------------
+  # Airflow Scheduler
+  # ----------------------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: data_platform_airflow_scheduler
+    restart: always
+    command: airflow scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ----------------------------------------------------------------------------
+  # Business Intelligence Dashboard: Metabase
+  # ----------------------------------------------------------------------------
+  metabase:
+    image: metabase/metabase:v0.49.5
+    container_name: data_platform_metabase
+    restart: always
+    ports:
+      - "${METABASE_PORT:-3000}:3000"
+    volumes:
+      - metabase_data:/metabase-data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - data_platform_net
+
+volumes:
+  postgres_data:
+  minio_data:
+  metabase_data:
+  airflow_logs:
+
+networks:
+  data_platform_net:
+    driver: bridge
