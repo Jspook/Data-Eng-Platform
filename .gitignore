@@ -75,3 +75,7 @@ htmlcov/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Project-Specific Personal Rules
+rule.md
+
